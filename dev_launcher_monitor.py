@@ -582,12 +582,17 @@ def health():
     return jsonify({"status": "ok", "ts": datetime.now(timezone.utc).isoformat()})
 
 # ══════════════════════════════════════════════════════════
+# STARTUP — inicializa banco ao carregar o módulo (gunicorn)
+# ══════════════════════════════════════════════════════════
+if DATABASE_URL:
+    init_db()
+else:
+    log("⚠️  DATABASE_URL não configurado — banco não inicializado")
+
+# ══════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL não configurado")
-    init_db()
     port = int(os.environ.get("PORT", 5001))
     log(f"🚀 dev-launcher-monitor iniciando na porta {port}")
     app.run(host="0.0.0.0", port=port)
