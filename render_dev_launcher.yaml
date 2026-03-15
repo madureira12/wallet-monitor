@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: dev-launcher-monitor
+    runtime: python
+    buildCommand: pip install -r requirements_dev_launcher.txt
+    startCommand: gunicorn dev_launcher_monitor:app --workers 2 --bind 0.0.0.0:$PORT --timeout 120
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # definir no painel Render — aponta para o Railway do novo projeto
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false          # opcional — bearer token para proteger o endpoint /webhook
+    healthCheckPath: /health
+    autoDeploy: true

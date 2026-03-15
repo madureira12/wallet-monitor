@@ -14,10 +14,17 @@ from flask import Flask, request, jsonify
 HELIUS_API_KEY  = os.environ.get("HELIUS_API_KEY", "")
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT   = os.environ.get("TELEGRAM_CHAT", "")
-DATABASE_URL    = os.environ.get("DATABASE_URL", "")
+# Prefere PUBLIC URL pois railway.internal pode não resolver (private networking)
+_db_public = os.environ.get("DATABASE_PUBLIC_URL", "")
+_db_intern = os.environ.get("DATABASE_URL", "")
+print(f"[DB] DATABASE_PUBLIC_URL set={bool(_db_public)} DATABASE_URL host={'railway.internal' if 'railway.internal' in _db_intern else 'other'}", flush=True)
+DATABASE_URL    = _db_public or _db_intern or ""
 WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "")
 
-DEV_WALLET      = "GpTXmkdvrTajqkzX1fBmC4BUjSboF9dHgfnqPqj8WAc4"
+DEV_WALLETS     = {
+    "GpTXmkdvrTajqkzX1fBmC4BUjSboF9dHgfnqPqj8WAc4",  # carteira 1
+    "D9gQ6RhKEpnobPBUdWY5bPQt2p3zGk3iVz6ChpUi2ArA",  # carteira 2
+}
 MC_THRESHOLD    = 10_000       # USD — filtro mínimo
 TRIAGE_INTERVAL = 10           # segundos entre polls na triagem
 TRIAGE_MAX_SECS = 120          # TTL do job de triagem (2 min)
@@ -58,6 +65,7 @@ def init_db():
                     token_address           TEXT UNIQUE NOT NULL,
                     nome                    TEXT,
                     symbol                  TEXT,
+                    wallet_origem           TEXT,
                     detectado_em            TIMESTAMP,
                     criado_em               TIMESTAMP,
                     cruzou_10k_em           TIMESTAMP,
@@ -65,6 +73,10 @@ def init_db():
                     mc_cross                NUMERIC,
                     status                  TEXT DEFAULT 'pendente'
                 )
+            """)
+            # migração: adiciona coluna se já existir tabela sem ela
+            cur.execute("""
+                ALTER TABLE tokens_dev ADD COLUMN IF NOT EXISTS wallet_origem TEXT
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS snapshots_dev (
@@ -91,14 +103,14 @@ def init_db():
         conn.commit()
     log("✅ Banco inicializado")
 
-def db_insert_token(token_address, nome, symbol, detectado_em, criado_em):
+def db_insert_token(token_address, nome, symbol, detectado_em, criado_em, wallet_origem=None):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO tokens_dev (token_address, nome, symbol, detectado_em, criado_em, status)
-                VALUES (%s, %s, %s, %s, %s, 'pendente')
+                INSERT INTO tokens_dev (token_address, nome, symbol, wallet_origem, detectado_em, criado_em, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pendente')
                 ON CONFLICT (token_address) DO NOTHING
-            """, (token_address, nome, symbol, detectado_em, criado_em))
+            """, (token_address, nome, symbol, wallet_origem, detectado_em, criado_em))
         conn.commit()
 
 def db_update_status(token_address, status):
@@ -424,24 +436,28 @@ def job_triagem(token_address, detectado_em, criado_em):
 # ══════════════════════════════════════════════════════════
 def extrair_mint_token(payload_list):
     """
-    Retorna (token_address, nome, symbol, criado_em) a partir do payload Helius.
+    Retorna (token_address, nome, symbol, criado_em, wallet_origem) a partir do payload Helius.
     Suporta os formatos enhanced e raw da API Helius.
     """
     for tx in (payload_list if isinstance(payload_list, list) else [payload_list]):
-        # Filtro por fee payer = carteira monitorada
+        # Identifica qual das carteiras monitoradas é fee payer
         fee_payer = tx.get("feePayer", "")
-        if fee_payer != DEV_WALLET:
-            # Verifica também em accountData
+        wallet_origem = fee_payer if fee_payer in DEV_WALLETS else None
+
+        if wallet_origem is None:
+            # Verifica também em accountData (quem pagou SOL)
             account_data = tx.get("accountData") or []
             payers = [a.get("account") for a in account_data if a.get("nativeBalanceChange", 0) < 0]
-            if DEV_WALLET not in payers:
-                continue
+            wallet_origem = next((w for w in payers if w in DEV_WALLETS), None)
+
+        if wallet_origem is None:
+            continue
 
         # Tenta extrair via tokenTransfers (enhanced)
         for tt in (tx.get("tokenTransfers") or []):
             mint = tt.get("mint", "")
             if mint and mint != "So11111111111111111111111111111111111111112":
-                return mint, tt.get("tokenName", ""), tt.get("tokenSymbol", ""), _ts(tx)
+                return mint, tt.get("tokenName", ""), tt.get("tokenSymbol", ""), _ts(tx), wallet_origem
 
         # Tenta via instructions (raw)
         for ix in (tx.get("instructions") or []):
@@ -451,16 +467,16 @@ def extrair_mint_token(payload_list):
             ):
                 accounts = ix.get("accounts") or []
                 if accounts:
-                    return accounts[0], "", "", _ts(tx)
+                    return accounts[0], "", "", _ts(tx), wallet_origem
 
         # Tenta via description (fallback)
         desc = tx.get("description", "")
         if "created" in desc.lower() or "minted" in desc.lower():
             for td in (tx.get("tokenTransfers") or []):
                 if td.get("mint"):
-                    return td["mint"], "", "", _ts(tx)
+                    return td["mint"], "", "", _ts(tx), wallet_origem
 
-    return None, None, None, None
+    return None, None, None, None, None
 
 def _ts(tx):
     ts_unix = tx.get("timestamp")
@@ -484,15 +500,15 @@ def webhook():
     if not payload:
         return jsonify({"ok": True})
 
-    token_address, nome, symbol, criado_em = extrair_mint_token(payload)
+    token_address, nome, symbol, criado_em, wallet_origem = extrair_mint_token(payload)
 
     if not token_address:
         return jsonify({"ok": True, "msg": "no relevant mint found"})
 
-    log(f"📨 Webhook recebido: {token_address[:8]} ({symbol})")
+    log(f"📨 Webhook recebido: {token_address[:8]} ({symbol}) | wallet={wallet_origem[:8] if wallet_origem else '?'}")
 
     detectado_em = datetime.now(timezone.utc)
-    db_insert_token(token_address, nome or "", symbol or "", detectado_em, criado_em)
+    db_insert_token(token_address, nome or "", symbol or "", detectado_em, criado_em, wallet_origem)
 
     t = threading.Thread(
         target=job_triagem,
@@ -518,7 +534,16 @@ def status():
                 """)
                 contagens = {r["status"]: r["total"] for r in cur.fetchall()}
                 cur.execute("""
-                    SELECT t.token_address, t.symbol, t.status,
+                    SELECT wallet_origem, status, COUNT(*) as total
+                    FROM tokens_dev GROUP BY wallet_origem, status
+                    ORDER BY wallet_origem, status
+                """)
+                por_carteira = {}
+                for r in cur.fetchall():
+                    w = r["wallet_origem"] or "desconhecida"
+                    por_carteira.setdefault(w, {})[r["status"]] = r["total"]
+                cur.execute("""
+                    SELECT t.token_address, t.symbol, t.status, t.wallet_origem,
                            t.cruzou_10k_em, t.mc_cross, t.tempo_ate_10k_segundos
                     FROM tokens_dev t
                     WHERE t.status IN ('monitorando','concluido')
@@ -528,7 +553,7 @@ def status():
                 for r in recentes:
                     if r.get("cruzou_10k_em"):
                         r["cruzou_10k_em"] = r["cruzou_10k_em"].isoformat()
-        return jsonify({"contagens": contagens, "recentes": recentes})
+        return jsonify({"contagens": contagens, "por_carteira": por_carteira, "recentes": recentes})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -582,16 +607,19 @@ def health():
     return jsonify({"status": "ok", "ts": datetime.now(timezone.utc).isoformat()})
 
 # ══════════════════════════════════════════════════════════
-# STARTUP — inicializa banco ao carregar o módulo (gunicorn)
+# STARTUP — funciona tanto com gunicorn quanto direto
 # ══════════════════════════════════════════════════════════
-if DATABASE_URL:
-    init_db()
-else:
-    log("⚠️  DATABASE_URL não configurado — banco não inicializado")
+def _startup():
+    if DATABASE_URL:
+        try:
+            init_db()
+        except Exception as e:
+            log(f"⚠️  DB init falhou no startup: {e}")
+    else:
+        log("⚠️  DATABASE_URL não configurado — banco indisponível")
 
-# ══════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════
+_startup()
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     log(f"🚀 dev-launcher-monitor iniciando na porta {port}")

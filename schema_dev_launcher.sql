@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS tokens_dev (
     token_address           TEXT UNIQUE NOT NULL,
     nome                    TEXT,
     symbol                  TEXT,
+    wallet_origem           TEXT,                -- carteira que lançou o token
     detectado_em            TIMESTAMP,           -- quando o webhook recebeu
     criado_em               TIMESTAMP,           -- timestamp real do bloco
     cruzou_10k_em           TIMESTAMP,           -- momento que atingiu 10k MC
@@ -14,6 +15,9 @@ CREATE TABLE IF NOT EXISTS tokens_dev (
     status                  TEXT DEFAULT 'pendente'
     -- status: pendente | monitorando | concluido | descartado
 );
+
+-- migração para bancos existentes
+ALTER TABLE tokens_dev ADD COLUMN IF NOT EXISTS wallet_origem TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_td_address ON tokens_dev(token_address);
 CREATE INDEX IF NOT EXISTS idx_td_status  ON tokens_dev(status);
@@ -44,6 +48,7 @@ SELECT
     t.token_address,
     t.symbol,
     t.nome,
+    t.wallet_origem,
     t.cruzou_10k_em,
     t.tempo_ate_10k_segundos,
     t.mc_cross,
