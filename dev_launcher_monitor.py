@@ -100,6 +100,41 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_td_address ON tokens_dev(token_address)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sd_address ON snapshots_dev(token_address)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_td_status  ON tokens_dev(status)")
+            cur.execute("""
+                CREATE OR REPLACE VIEW tokens_dev_performance AS
+                SELECT
+                    t.token_address, t.symbol, t.nome, t.wallet_origem,
+                    t.cruzou_10k_em, t.tempo_ate_10k_segundos, t.mc_cross, t.status,
+                    s_cross.mc AS mc_at_cross,
+                    s_t2.mc   AS mc_t2,
+                    s_t5.mc   AS mc_t5,
+                    s_t15.mc  AS mc_t15,
+                    s_t60.mc  AS mc_t60,
+                    CASE WHEN t.mc_cross > 0 THEN ROUND(((s_t2.mc  - t.mc_cross) / t.mc_cross) * 100, 2) END AS var_t2,
+                    CASE WHEN t.mc_cross > 0 THEN ROUND(((s_t5.mc  - t.mc_cross) / t.mc_cross) * 100, 2) END AS var_t5,
+                    CASE WHEN t.mc_cross > 0 THEN ROUND(((s_t15.mc - t.mc_cross) / t.mc_cross) * 100, 2) END AS var_t15,
+                    CASE WHEN t.mc_cross > 0 THEN ROUND(((s_t60.mc - t.mc_cross) / t.mc_cross) * 100, 2) END AS var_t60,
+                    GREATEST(COALESCE(s_cross.mc,0), COALESCE(s_t2.mc,0), COALESCE(s_t5.mc,0), COALESCE(s_t15.mc,0), COALESCE(s_t60.mc,0)) AS pico_mc,
+                    CASE WHEN t.mc_cross > 0 THEN ROUND(((GREATEST(
+                        COALESCE(s_cross.mc,0), COALESCE(s_t2.mc,0), COALESCE(s_t5.mc,0), COALESCE(s_t15.mc,0), COALESCE(s_t60.mc,0)
+                    ) - t.mc_cross) / t.mc_cross) * 100, 2) END AS var_pico,
+                    CASE
+                        WHEN GREATEST(COALESCE(s_cross.mc,0),COALESCE(s_t2.mc,0),COALESCE(s_t5.mc,0),COALESCE(s_t15.mc,0),COALESCE(s_t60.mc,0)) > t.mc_cross * 3
+                             AND COALESCE(s_t60.mc,0) > t.mc_cross * 2   THEN '🏆 VENCEDOR'
+                        WHEN GREATEST(COALESCE(s_cross.mc,0),COALESCE(s_t2.mc,0),COALESCE(s_t5.mc,0),COALESCE(s_t15.mc,0),COALESCE(s_t60.mc,0)) > t.mc_cross * 1.5
+                             AND COALESCE(s_t60.mc,0) < t.mc_cross       THEN '🎯 PUMP & DUMP'
+                        WHEN GREATEST(COALESCE(s_cross.mc,0),COALESCE(s_t2.mc,0),COALESCE(s_t5.mc,0),COALESCE(s_t15.mc,0),COALESCE(s_t60.mc,0)) > t.mc_cross * 1.5
+                             AND COALESCE(s_t60.mc,0) > t.mc_cross * 1.2 THEN '📈 BOM TRADE'
+                        ELSE '💀 MORREU'
+                    END AS categoria_final
+                FROM tokens_dev t
+                LEFT JOIN snapshots_dev s_cross ON s_cross.token_address = t.token_address AND s_cross.checkpoint = 'cross'
+                LEFT JOIN snapshots_dev s_t2    ON s_t2.token_address    = t.token_address AND s_t2.checkpoint    = 't2'
+                LEFT JOIN snapshots_dev s_t5    ON s_t5.token_address    = t.token_address AND s_t5.checkpoint    = 't5'
+                LEFT JOIN snapshots_dev s_t15   ON s_t15.token_address   = t.token_address AND s_t15.checkpoint   = 't15'
+                LEFT JOIN snapshots_dev s_t60   ON s_t60.token_address   = t.token_address AND s_t60.checkpoint   = 't60'
+                WHERE t.status IN ('monitorando', 'concluido')
+            """)
         conn.commit()
     log("✅ Banco inicializado")
 
@@ -598,6 +633,42 @@ def snapshots(token_address):
         for r in rows:
             if r.get("timestamp"):
                 r["timestamp"] = r["timestamp"].isoformat()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/tokens_dev_performance")
+def tokens_dev_performance():
+    wallet = request.args.get("wallet", "")
+    categoria = request.args.get("categoria", "")
+    limit = min(int(request.args.get("limit", 200)), 500)
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                filters = []
+                params = []
+                if wallet:
+                    filters.append("wallet_origem = %s")
+                    params.append(wallet)
+                if categoria:
+                    filters.append("categoria_final ILIKE %s")
+                    params.append(f"%{categoria}%")
+                where = ("WHERE " + " AND ".join(filters)) if filters else ""
+                params.append(limit)
+                cur.execute(f"""
+                    SELECT * FROM tokens_dev_performance
+                    {where}
+                    ORDER BY cruzou_10k_em DESC
+                    LIMIT %s
+                """, params)
+                rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            if r.get("cruzou_10k_em"):
+                r["cruzou_10k_em"] = r["cruzou_10k_em"].isoformat()
+            for k in ("mc_cross", "mc_at_cross", "mc_t2", "mc_t5", "mc_t15", "mc_t60",
+                      "pico_mc", "var_t2", "var_t5", "var_t15", "var_t60", "var_pico"):
+                if r.get(k) is not None:
+                    r[k] = float(r[k])
         return jsonify(rows)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
