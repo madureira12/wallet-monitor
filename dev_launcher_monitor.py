@@ -128,11 +128,11 @@ def init_db():
                         ELSE '💀 MORREU'
                     END AS categoria_final
                 FROM tokens_dev t
-                LEFT JOIN snapshots_dev s_cross ON s_cross.token_address = t.token_address AND s_cross.checkpoint = 'cross'
-                LEFT JOIN snapshots_dev s_t2    ON s_t2.token_address    = t.token_address AND s_t2.checkpoint    = 't2'
-                LEFT JOIN snapshots_dev s_t5    ON s_t5.token_address    = t.token_address AND s_t5.checkpoint    = 't5'
-                LEFT JOIN snapshots_dev s_t15   ON s_t15.token_address   = t.token_address AND s_t15.checkpoint   = 't15'
-                LEFT JOIN snapshots_dev s_t60   ON s_t60.token_address   = t.token_address AND s_t60.checkpoint   = 't60'
+                LEFT JOIN (SELECT DISTINCT ON (token_address) token_address, mc FROM snapshots_dev WHERE checkpoint = 'cross' ORDER BY token_address, id DESC) s_cross ON s_cross.token_address = t.token_address
+                LEFT JOIN (SELECT DISTINCT ON (token_address) token_address, mc FROM snapshots_dev WHERE checkpoint = 't2'    ORDER BY token_address, id DESC) s_t2    ON s_t2.token_address    = t.token_address
+                LEFT JOIN (SELECT DISTINCT ON (token_address) token_address, mc FROM snapshots_dev WHERE checkpoint = 't5'    ORDER BY token_address, id DESC) s_t5    ON s_t5.token_address    = t.token_address
+                LEFT JOIN (SELECT DISTINCT ON (token_address) token_address, mc FROM snapshots_dev WHERE checkpoint = 't15'   ORDER BY token_address, id DESC) s_t15   ON s_t15.token_address   = t.token_address
+                LEFT JOIN (SELECT DISTINCT ON (token_address) token_address, mc FROM snapshots_dev WHERE checkpoint = 't60'   ORDER BY token_address, id DESC) s_t60   ON s_t60.token_address   = t.token_address
                 WHERE t.status IN ('monitorando', 'concluido')
             """)
         conn.commit()
